@@ -1,0 +1,22 @@
+{
+  "name": "@agent-control/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agentctl": "dist/src/index.js"
+  },
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "pnpm build && node --test \"dist/test/**/*.test.js\"",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@agent-control/cli": "link:",
+    "@agent-control/contracts": "workspace:*"
+  }
+}

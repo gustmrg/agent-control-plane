@@ -1,0 +1,37 @@
+services:
+  gateway:
+    image: ${AGENT_CONTROL_GATEWAY_IMAGE:-agent-control-gateway:latest}
+    build:
+      context: ..
+      dockerfile: apps/gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 7070
+      AGENT_CONTROL_API_TOKEN: ${AGENT_CONTROL_API_TOKEN:?set AGENT_CONTROL_API_TOKEN}
+      AGENT_CONTROL_DATA_DIR: /var/lib/agent-control
+      AGENT_CONTROL_SANDBOX_IMAGE: ${AGENT_CONTROL_SANDBOX_IMAGE:-agent-control-sandbox:latest}
+      DOCKER_SOCKET: /var/run/docker.sock
+    ports:
+      - "127.0.0.1:${AGENT_CONTROL_PORT:-7070}:7070"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${AGENT_CONTROL_DATA_DIR:-/var/lib/agent-control}:/var/lib/agent-control
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:7070/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  sandbox-image:
+    image: ${AGENT_CONTROL_SANDBOX_IMAGE:-agent-control-sandbox:latest}
+    build:
+      context: ..
+      dockerfile: images/sandbox/Dockerfile
+    profiles: ["build-only"]
+    entrypoint: ["/bin/true"]

@@ -1,0 +1,11 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false
+
+overrides:
+  '@agent-control/cli': link:apps/cli
