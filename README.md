@@ -78,6 +78,7 @@ The CLI stores registrations with owner-only permissions under `~/.config/agent-
 agentctl sandbox create --name demo --repo https://github.com/example/project.git -- codex
 agentctl sandbox list
 agentctl sandbox connect demo
+agentctl sandbox connect demo --shell
 agentctl sandbox exec demo -- git status
 agentctl logs demo --tail
 agentctl sandbox stop demo
@@ -85,10 +86,10 @@ agentctl sandbox start demo
 agentctl sandbox delete demo
 ```
 
-Inside the sandbox, reconnect to the detached agent process with:
+`sandbox connect` automatically attaches to the persistent `agent` tmux session. If the initial command has exited or no session was created, it opens a login shell instead. To skip the session and open a shell directly, use:
 
 ```bash
-tmux attach -t agent
+agentctl sandbox connect demo --shell
 ```
 
 Deleting a sandbox preserves its named state volume by default. Permanently remove it with:

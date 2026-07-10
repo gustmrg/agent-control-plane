@@ -27,6 +27,15 @@ export const workspaceCommand = (command: string[]) => [
   `${workspaceDirectory}; exec ${command.map(shellQuote).join(" ")}`,
 ];
 
+export const connectCommand = (shellOnly = false) => {
+  if (shellOnly) return workspaceCommand(["bash", "-l"]);
+  return [
+    "sh",
+    "-lc",
+    `${workspaceDirectory}; if tmux has-session -t agent 2>/dev/null; then exec tmux attach-session -t agent; else exec bash -l; fi`,
+  ];
+};
+
 export const ensureIdentity = () => {
   mkdirSync(keysDirectory(), { recursive: true, mode: 0o700 });
   const identity = defaultIdentityFile();

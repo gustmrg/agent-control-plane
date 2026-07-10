@@ -21,6 +21,7 @@ import {
 import { printSandbox, printSandboxes, type OutputFormat } from "./output.js";
 import { knownHostsFile } from "./paths.js";
 import {
+  connectCommand,
   ensureIdentity,
   runSandboxSsh,
   trustHostKey,
@@ -319,7 +320,14 @@ const main = async () => {
   }
 
   if (sandboxGroup && (action === "connect" || action === "exec")) {
-    const id = requirePosition(rest, 0, "sandbox name or ID");
+    const options = parseOptions(
+      rest,
+      parsed.trailing,
+      action === "connect"
+        ? { "--shell": { key: "shell", boolean: true } }
+        : {},
+    );
+    const id = requirePosition(options.positionals, 0, "sandbox name or ID");
     if (action === "exec" && parsed.trailing.length === 0)
       throw new Error("Put the command after --");
     const selected = selectedHost();
@@ -337,7 +345,7 @@ const main = async () => {
       command:
         action === "exec"
           ? workspaceCommand(parsed.trailing)
-          : workspaceCommand(["bash", "-l"]),
+          : connectCommand(options.flags.has("shell")),
       tty: action === "connect",
     });
     return;

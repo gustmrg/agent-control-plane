@@ -8,7 +8,7 @@ import type { ClientConfig, HostConfig } from "@agent-control/contracts";
 
 import { loadConfig, resolveHost, saveConfig } from "../src/config.js";
 import { configFile } from "../src/paths.js";
-import { buildSandboxSshArgs } from "../src/ssh.js";
+import { buildSandboxSshArgs, connectCommand } from "../src/ssh.js";
 
 const direct: HostConfig = {
   transport: "direct",
@@ -53,6 +53,22 @@ test("remote sandbox SSH uses the saved SSH alias as a jump host", () => {
   assert.deepEqual(args.slice(0, 2), ["-J", "homelab"]);
   assert.ok(args.includes("StrictHostKeyChecking=yes"));
   assert.equal(args.at(-1), "'printf' '%s' 'hello world'");
+});
+
+test("sandbox connect attaches to the agent session with a shell fallback", () => {
+  assert.deepEqual(connectCommand(), [
+    "sh",
+    "-lc",
+    "cd /home/sandbox/workspace/repo 2>/dev/null || cd /home/sandbox/workspace; if tmux has-session -t agent 2>/dev/null; then exec tmux attach-session -t agent; else exec bash -l; fi",
+  ]);
+});
+
+test("sandbox connect can explicitly open a login shell", () => {
+  assert.deepEqual(connectCommand(true), [
+    "sh",
+    "-lc",
+    "cd /home/sandbox/workspace/repo 2>/dev/null || cd /home/sandbox/workspace; exec 'bash' '-l'",
+  ]);
 });
 
 test("host configuration round-trips through an owner-only TOML file", (t) => {
