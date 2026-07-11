@@ -27,6 +27,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@agent-control/cli':
+        specifier: 'link:'
+        version: 'link:'
       '@agent-control/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

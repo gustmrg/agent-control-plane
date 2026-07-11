@@ -8,4 +8,4 @@ allowBuilds:
   ssh2: false
 
 overrides:
-  '@agent-control/cli': link:apps/cli
+  "@agent-control/cli": link:apps/cli

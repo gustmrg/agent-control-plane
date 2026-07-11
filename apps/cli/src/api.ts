@@ -1,7 +1,12 @@
 import type {
+  AgentProfile,
+  AgentType,
   CreateSandboxRequest,
+  PutAgentProfileRequest,
+  PutSecretRequest,
   Sandbox,
   SandboxConnection,
+  SecretMetadata,
   StatusResponse,
 } from "@agent-control/contracts";
 
@@ -10,6 +15,17 @@ import type { HostConfig } from "@agent-control/contracts";
 import { withGatewayEndpoint } from "./tunnel.js";
 
 type ApiEnvelope<T> = { data: T };
+
+export class GatewayError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "GatewayError";
+  }
+}
 
 export class GatewayClient {
   constructor(
@@ -28,10 +44,12 @@ export class GatewayClient {
     });
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as {
-        error?: { message?: string };
+        error?: { code?: string; message?: string };
       } | null;
-      throw new Error(
+      throw new GatewayError(
         body?.error?.message ?? `Gateway request failed (${response.status})`,
+        body?.error?.code ?? "gateway_error",
+        response.status,
       );
     }
     return response;
@@ -99,6 +117,94 @@ export class GatewayClient {
           `/v1/sandboxes/${encodeURIComponent(id)}/connection`,
         )
       ).json()) as ApiEnvelope<SandboxConnection>
+    ).data;
+  }
+
+  async listSecrets() {
+    return (
+      (await (await this.response("/v1/secrets")).json()) as ApiEnvelope<
+        SecretMetadata[]
+      >
+    ).data;
+  }
+
+  async getSecret(name: string) {
+    return (
+      (await (
+        await this.response(`/v1/secrets/${encodeURIComponent(name)}`)
+      ).json()) as ApiEnvelope<SecretMetadata>
+    ).data;
+  }
+
+  async putSecret(name: string, input: PutSecretRequest) {
+    return (
+      (await (
+        await this.response(`/v1/secrets/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          body: JSON.stringify(input),
+        })
+      ).json()) as ApiEnvelope<SecretMetadata>
+    ).data;
+  }
+
+  async deleteSecret(name: string) {
+    return (
+      (await (
+        await this.response(`/v1/secrets/${encodeURIComponent(name)}`, {
+          method: "DELETE",
+        })
+      ).json()) as ApiEnvelope<SecretMetadata>
+    ).data;
+  }
+
+  async listProfiles() {
+    return (
+      (await (await this.response("/v1/profiles")).json()) as ApiEnvelope<
+        AgentProfile[]
+      >
+    ).data;
+  }
+
+  async getProfile(name: string) {
+    return (
+      (await (
+        await this.response(`/v1/profiles/${encodeURIComponent(name)}`)
+      ).json()) as ApiEnvelope<AgentProfile>
+    ).data;
+  }
+
+  async putProfile(name: string, input: PutAgentProfileRequest) {
+    return (
+      (await (
+        await this.response(`/v1/profiles/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          body: JSON.stringify(input),
+        })
+      ).json()) as ApiEnvelope<AgentProfile>
+    ).data;
+  }
+
+  async deleteProfile(name: string) {
+    return (
+      (await (
+        await this.response(`/v1/profiles/${encodeURIComponent(name)}`, {
+          method: "DELETE",
+        })
+      ).json()) as ApiEnvelope<AgentProfile>
+    ).data;
+  }
+
+  async setDefaultProfile(agent: AgentType, profileName: string | null) {
+    const response = await this.response(`/v1/profiles/defaults/${agent}`, {
+      method: profileName === null ? "DELETE" : "PUT",
+      ...(profileName === null
+        ? {}
+        : { body: JSON.stringify({ profileName }) }),
+    });
+    return (
+      (await response.json()) as ApiEnvelope<
+        AgentProfile | { agent: AgentType; profileName: null }
+      >
     ).data;
   }
 

@@ -11,12 +11,14 @@ services:
       AGENT_CONTROL_API_TOKEN: ${AGENT_CONTROL_API_TOKEN:?set AGENT_CONTROL_API_TOKEN}
       AGENT_CONTROL_DATA_DIR: /var/lib/agent-control
       AGENT_CONTROL_SANDBOX_IMAGE: ${AGENT_CONTROL_SANDBOX_IMAGE:-agent-control-sandbox:latest}
+      AGENT_CONTROL_MASTER_KEY_FILE: /run/secrets/agent-control-master-key
       DOCKER_SOCKET: /var/run/docker.sock
     ports:
       - "127.0.0.1:${AGENT_CONTROL_PORT:-7070}:7070"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${AGENT_CONTROL_DATA_DIR:-/var/lib/agent-control}:/var/lib/agent-control
+      - ${AGENT_CONTROL_MASTER_KEY_FILE:-./master.key}:/run/secrets/agent-control-master-key:ro
     healthcheck:
       test:
         - CMD

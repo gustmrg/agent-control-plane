@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const sandboxName = z
+export const resourceNameSchema = z
   .string()
   .min(1)
   .max(63)
@@ -8,6 +8,8 @@ const sandboxName = z
     message:
       "Sandbox names must start with a letter and contain only lowercase letters, numbers, and hyphens",
   });
+
+const sandboxName = resourceNameSchema;
 
 const httpsRepositoryUrl = z
   .url()
@@ -48,6 +50,7 @@ export const createSandboxRequestSchema = z.object({
     .string()
     .regex(/^\d+(?:\.\d+)?(?:[KMGT]i?|[kmgt])?[Bb]?$/)
     .optional(),
+  profileName: sandboxName.optional(),
 });
 export type CreateSandboxRequest = z.infer<typeof createSandboxRequestSchema>;
 
@@ -66,6 +69,8 @@ export const sandboxSchema = z.object({
   updatedAt: z.iso.datetime(),
   deletedAt: z.iso.datetime().nullable(),
   lastError: z.string().nullable(),
+  profileName: sandboxName.nullable().default(null),
+  profileVersion: z.number().int().positive().nullable().default(null),
 });
 export type Sandbox = z.infer<typeof sandboxSchema>;
 
@@ -146,3 +151,89 @@ export const statusResponseSchema = z.object({
   database: z.literal("ok"),
 });
 export type StatusResponse = z.infer<typeof statusResponseSchema>;
+
+export const secretTypeSchema = z.enum([
+  "codex-auth",
+  "opencode-openai-oauth",
+  "opencode-go-key",
+  "opaque",
+]);
+export type SecretType = z.infer<typeof secretTypeSchema>;
+
+export const secretMetadataSchema = z.object({
+  name: sandboxName,
+  type: secretTypeSchema,
+  backend: z.literal("local"),
+  version: z.number().int().positive(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+export type SecretMetadata = z.infer<typeof secretMetadataSchema>;
+
+export const putSecretRequestSchema = z.object({
+  type: secretTypeSchema,
+  valueBase64: z.string().min(1).max(1_500_000),
+  expectedVersion: z.number().int().positive().optional(),
+});
+export type PutSecretRequest = z.infer<typeof putSecretRequestSchema>;
+
+export const agentTypeSchema = z.enum(["codex", "opencode"]);
+export type AgentType = z.infer<typeof agentTypeSchema>;
+
+export const profileCredentialSchema = z.object({
+  secretName: sandboxName,
+  type: secretTypeSchema,
+});
+export type ProfileCredential = z.infer<typeof profileCredentialSchema>;
+
+export const agentProfileSchema = z.object({
+  name: sandboxName,
+  agent: agentTypeSchema,
+  version: z.number().int().positive(),
+  credentials: z.array(profileCredentialSchema),
+  isDefault: z.boolean(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+export type AgentProfile = z.infer<typeof agentProfileSchema>;
+
+export const putAgentProfileRequestSchema = z.object({
+  agent: agentTypeSchema,
+  bundleBase64: z.string().min(1).max(70_000_000),
+  secretNames: z.array(sandboxName).max(8).default([]),
+});
+export type PutAgentProfileRequest = z.infer<
+  typeof putAgentProfileRequestSchema
+>;
+
+export const profileBundleFileSchema = z.object({
+  path: z.string().min(1).max(4096),
+  contentBase64: z.string().max(15_000_000),
+  mode: z.union([
+    z.literal(0o600),
+    z.literal(0o644),
+    z.literal(0o700),
+    z.literal(0o755),
+  ]),
+});
+
+export const profileBundleSchema = z.object({
+  version: z.literal(1),
+  files: z.array(profileBundleFileSchema).max(5000),
+});
+export type ProfileBundle = z.infer<typeof profileBundleSchema>;
+
+export const setDefaultProfileRequestSchema = z.object({
+  profileName: sandboxName,
+});
+
+export const secretResponseSchema = z.object({ data: secretMetadataSchema });
+export const secretListResponseSchema = z.object({
+  data: z.array(secretMetadataSchema),
+});
+export const agentProfileResponseSchema = z.object({
+  data: agentProfileSchema,
+});
+export const agentProfileListResponseSchema = z.object({
+  data: z.array(agentProfileSchema),
+});

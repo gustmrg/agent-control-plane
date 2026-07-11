@@ -5,7 +5,11 @@ import { mkdirSync } from "node:fs";
 import { buildApp } from "./app.js";
 import { DockerodeRuntime } from "./docker/dockerode-runtime.js";
 import { openSandboxStore } from "./persistence/store.js";
+import { ProfileService } from "./profiles/service.js";
 import { SandboxService } from "./sandboxes/service.js";
+import { loadSecretCipher } from "./secrets/crypto.js";
+import { LocalSecretBackend } from "./secrets/local-backend.js";
+import { SecretService } from "./secrets/service.js";
 
 const required = (name: string) => {
   const value = process.env[name];
@@ -19,13 +23,35 @@ mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
 
 const token = required("AGENT_CONTROL_API_TOKEN");
 const store = openSandboxStore(`${dataDirectory}/gateway.db`);
+const secretCipher = process.env.AGENT_CONTROL_MASTER_KEY_FILE
+  ? loadSecretCipher(process.env.AGENT_CONTROL_MASTER_KEY_FILE)
+  : undefined;
+const secretBackend = secretCipher
+  ? new LocalSecretBackend(store, secretCipher)
+  : undefined;
 const runtime = new DockerodeRuntime(
   process.env.DOCKER_SOCKET ?? "/var/run/docker.sock",
 );
 const defaultImage =
   process.env.AGENT_CONTROL_SANDBOX_IMAGE ?? "agent-control-sandbox:latest";
-const service = new SandboxService({ store, runtime, defaultImage });
-const app = buildApp({ store, runtime, token, defaultImage, logger: true });
+const profiles = secretCipher
+  ? new ProfileService(store, new SecretService(secretBackend), secretCipher)
+  : undefined;
+const service = new SandboxService({
+  store,
+  runtime,
+  defaultImage,
+  ...(profiles ? { profiles } : {}),
+});
+const app = buildApp({
+  store,
+  runtime,
+  token,
+  defaultImage,
+  logger: true,
+  trustProxy: process.env.AGENT_CONTROL_TRUST_PROXY === "true",
+  ...(secretCipher && secretBackend ? { secretCipher, secretBackend } : {}),
+});
 
 const reconcile = async () => {
   const orphans = await service.reconcile();

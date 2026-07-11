@@ -21,6 +21,14 @@ export type CreateRuntimeSandbox = {
   stateVolume: string;
   cpu?: string;
   memory?: string;
+  bootstrapFiles?: StateFile[];
+};
+
+export type StateFile = {
+  path: string;
+  content: Buffer;
+  mode: 0o600 | 0o644 | 0o700 | 0o755;
+  jsonMergeKeys?: string[];
 };
 
 export type ContainerRuntime = {
@@ -32,6 +40,7 @@ export type ContainerRuntime = {
   stop(id: string): Promise<void>;
   remove(id: string): Promise<void>;
   removeVolume(name: string): Promise<void>;
+  readStateFile(id: string, path: string): Promise<Buffer | null>;
   logs(
     id: string,
     options?: { tail?: boolean; lines?: number },

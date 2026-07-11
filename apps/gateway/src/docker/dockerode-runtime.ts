@@ -7,6 +7,7 @@ import type {
   CreateRuntimeSandbox,
   RuntimeSandbox,
 } from "./runtime.js";
+import { firstArchiveFile, mergeJsonStateFile, stateArchive } from "./tar.js";
 
 const labels = (id: string, name: string, resource: "container" | "state") => ({
   "agent-control.managed": "true",
@@ -124,6 +125,45 @@ export class DockerodeRuntime implements ContainerRuntime {
     throw new Error("Sandbox SSH host key was not ready within 15 seconds");
   }
 
+  private async readContainerFile(container: Docker.Container, path: string) {
+    try {
+      const stream = await container.getArchive({ path });
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream as Readable)
+        chunks.push(Buffer.from(chunk));
+      return firstArchiveFile(Buffer.concat(chunks));
+    } catch (error) {
+      if ((error as { statusCode?: number }).statusCode === 404) return null;
+      throw error;
+    }
+  }
+
+  private async mergeBootstrapFiles(
+    helper: Docker.Container,
+    files: CreateRuntimeSandbox["bootstrapFiles"],
+  ) {
+    if (!files) return [];
+    return Promise.all(
+      files.map(async (file) => {
+        if (!file.jsonMergeKeys?.length) return file;
+        const existing = await this.readContainerFile(
+          helper,
+          `/state/${file.path}`,
+        );
+        if (!existing) return file;
+        return {
+          ...file,
+          content: mergeJsonStateFile(
+            existing,
+            file.content,
+            file.jsonMergeKeys,
+            file.path,
+          ),
+        };
+      }),
+    );
+  }
+
   async create(spec: CreateRuntimeSandbox): Promise<RuntimeSandbox> {
     await this.ensureNetwork();
     await this.pullImage(spec.image);
@@ -131,6 +171,26 @@ export class DockerodeRuntime implements ContainerRuntime {
       Name: spec.stateVolume,
       Labels: labels(spec.id, spec.name, "state"),
     });
+
+    if (spec.bootstrapFiles?.length) {
+      const helper = await this.docker.createContainer({
+        Image: spec.image,
+        Cmd: ["/bin/sh", "-c", "true"],
+        HostConfig: { Binds: [`${spec.stateVolume}:/state`] },
+        Labels: labels(spec.id, spec.name, "state"),
+      });
+      try {
+        const files = await this.mergeBootstrapFiles(
+          helper,
+          spec.bootstrapFiles,
+        );
+        await helper.putArchive(Readable.from([stateArchive(files)]), {
+          path: "/state",
+        });
+      } finally {
+        await helper.remove({ force: true }).catch(() => undefined);
+      }
+    }
 
     const container = await this.docker.createContainer({
       name: `agent-control-${spec.name}-${spec.id.slice(0, 8)}`,
@@ -275,6 +335,12 @@ export class DockerodeRuntime implements ContainerRuntime {
       .catch((error: unknown) => {
         if ((error as { statusCode?: number }).statusCode !== 404) throw error;
       });
+  }
+
+  async readStateFile(id: string, path: string) {
+    const container = await this.containerFor(id);
+    if (!container) throw new Error("Sandbox container not found");
+    return this.readContainerFile(container, `/home/sandbox/${path}`);
   }
 
   async logs(id: string, options: { tail?: boolean; lines?: number } = {}) {

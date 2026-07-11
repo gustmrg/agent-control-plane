@@ -11,11 +11,13 @@ import type {
 import type { ContainerRuntime, RuntimeSandbox } from "../docker/runtime.js";
 import { AppError, notFound } from "../errors.js";
 import type { SandboxRecord, SandboxStore } from "../persistence/store.js";
+import type { ProfileService } from "../profiles/service.js";
 
 export type SandboxServiceOptions = {
   store: SandboxStore;
   runtime: ContainerRuntime;
   defaultImage?: string;
+  profiles?: ProfileService;
 };
 
 const observedState = (
@@ -45,17 +47,21 @@ const toSandbox = (
   updatedAt: record.updatedAt,
   deletedAt: record.deletedAt,
   lastError: record.lastError,
+  profileName: record.profileName,
+  profileVersion: record.profileVersion,
 });
 
 export class SandboxService {
   private readonly store: SandboxStore;
   private readonly runtime: ContainerRuntime;
   private readonly defaultImage: string;
+  private readonly profiles: ProfileService | undefined;
 
   constructor(options: SandboxServiceOptions) {
     this.store = options.store;
     this.runtime = options.runtime;
     this.defaultImage = options.defaultImage ?? "agent-control-sandbox:latest";
+    this.profiles = options.profiles;
   }
 
   private record(idOrName: string) {
@@ -64,7 +70,34 @@ export class SandboxService {
     return record;
   }
 
+  private async syncCredentials(record: SandboxRecord) {
+    if (!this.profiles) return;
+    const leased = this.store
+      .listSecretLeases()
+      .some((lease) => lease.sandboxId === record.id);
+    if (!leased) return;
+    const path = this.profiles.authPath(record);
+    if (!path) return;
+    const auth = await this.runtime.readStateFile(record.id, path);
+    if (!auth)
+      throw new AppError(
+        502,
+        "secret_writeback_failed",
+        "Agent authentication file is missing; the credential lease was retained",
+      );
+    this.profiles.writeBack(record, auth);
+  }
+
   async create(input: CreateSandboxRequest): Promise<Sandbox> {
+    if (input.profileName && !this.profiles) {
+      throw new AppError(
+        503,
+        "secrets_not_configured",
+        "Secret management is not configured on this gateway",
+      );
+    }
+    const profile =
+      this.profiles?.resolve(input.profileName, input.command) ?? null;
     const name = input.name ?? `sandbox-${Date.now().toString(36)}`;
     const existing = this.store.get(name);
     if (existing && !existing.deletedAt) {
@@ -88,6 +121,8 @@ export class SandboxService {
           updatedAt: now,
           deletedAt: null,
           lastError: null,
+          profileName: profile?.name ?? null,
+          profileVersion: profile?.version ?? null,
         })
       : this.store.create({
           id,
@@ -104,9 +139,12 @@ export class SandboxService {
           updatedAt: now,
           deletedAt: null,
           lastError: null,
+          profileName: profile?.name ?? null,
+          profileVersion: profile?.version ?? null,
         });
 
     try {
+      const bootstrapFiles = this.profiles?.bootstrap(record) ?? [];
       const runtime = await this.runtime.create({
         id,
         name,
@@ -117,6 +155,7 @@ export class SandboxService {
         stateVolume: record.stateVolume,
         ...(input.cpu ? { cpu: input.cpu } : {}),
         ...(input.memory ? { memory: input.memory } : {}),
+        ...(bootstrapFiles.length ? { bootstrapFiles } : {}),
       });
       const updated = this.store.update(id, {
         containerId: runtime.containerId,
@@ -126,10 +165,16 @@ export class SandboxService {
       });
       return toSandbox(updated, runtime);
     } catch (error) {
+      this.profiles?.release(record);
+      const failedAt = new Date().toISOString();
       this.store.update(id, {
         lastError: error instanceof Error ? error.message : String(error),
-        updatedAt: new Date().toISOString(),
+        updatedAt: failedAt,
+        ...(error instanceof AppError && error.statusCode === 409
+          ? { desiredState: "deleted", deletedAt: failedAt }
+          : {}),
       });
+      if (error instanceof AppError) throw error;
       throw new AppError(502, "runtime_error", "Failed to create sandbox");
     }
   }
@@ -151,7 +196,13 @@ export class SandboxService {
 
   async start(idOrName: string) {
     const record = this.record(idOrName);
-    await this.runtime.start(record.id);
+    this.profiles?.acquire(record);
+    try {
+      await this.runtime.start(record.id);
+    } catch (error) {
+      this.profiles?.release(record);
+      throw error;
+    }
     const updated = this.store.update(record.id, {
       desiredState: "running",
       updatedAt: new Date().toISOString(),
@@ -167,11 +218,27 @@ export class SandboxService {
       desiredState: "stopped",
       updatedAt: new Date().toISOString(),
     });
+    try {
+      await this.syncCredentials(updated);
+    } catch (error) {
+      this.store.update(record.id, {
+        lastError: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString(),
+      });
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        502,
+        "secret_writeback_failed",
+        "Failed to persist agent authentication; the credential lease was retained",
+      );
+    }
     return toSandbox(updated, await this.runtime.inspect(record.id));
   }
 
   async delete(idOrName: string, deleteVolume: boolean) {
     const record = this.record(idOrName);
+    await this.runtime.stop(record.id);
+    await this.syncCredentials(record);
     await this.runtime.remove(record.id);
     if (deleteVolume) await this.runtime.removeVolume(record.stateVolume);
     const now = new Date().toISOString();
@@ -229,6 +296,16 @@ export class SandboxService {
         continue;
       }
       if (runtime) {
+        if (runtime.state === "stopped") {
+          try {
+            await this.syncCredentials(record);
+          } catch (error) {
+            this.store.update(record.id, {
+              lastError: error instanceof Error ? error.message : String(error),
+              updatedAt: new Date().toISOString(),
+            });
+          }
+        }
         this.store.update(record.id, {
           containerId: runtime.containerId,
           sshHostPort: runtime.sshHostPort,

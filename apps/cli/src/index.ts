@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 
 import {
+  agentTypeSchema,
   createSandboxRequestSchema,
   directHostConfigSchema,
+  putAgentProfileRequestSchema,
+  putSecretRequestSchema,
+  secretTypeSchema,
   sshHostConfigSchema,
 } from "@agent-control/contracts";
 
-import { withGatewayClient } from "./api.js";
+import { GatewayError, withGatewayClient } from "./api.js";
 import {
   loadConfig,
   putHost,
@@ -18,8 +23,25 @@ import {
   saveConfig,
   selectHost,
 } from "./config.js";
-import { printSandbox, printSandboxes, type OutputFormat } from "./output.js";
+import {
+  createOutputContext,
+  printError,
+  printHosts,
+  printProfile,
+  printProfiles,
+  printProperties,
+  printSandbox,
+  printSandboxes,
+  printSecret,
+  printSecrets,
+  printStatus,
+  printSuccess,
+  printValue,
+  type OutputContext,
+  type OutputFormat,
+} from "./output.js";
 import { knownHostsFile } from "./paths.js";
+import { credentialName, importLocalProfile } from "./profiles.js";
 import {
   connectCommand,
   ensureIdentity,
@@ -28,7 +50,12 @@ import {
   workspaceCommand,
 } from "./ssh.js";
 
-type GlobalOptions = { host?: string; output: OutputFormat; quiet: boolean };
+type GlobalOptions = {
+  host?: string;
+  output: OutputFormat;
+  quiet: boolean;
+  noColor: boolean;
+};
 type CommandOptions = {
   values: Record<string, string>;
   flags: Set<string>;
@@ -46,6 +73,8 @@ Commands:
   doctor
   host add|list|select|info|remove
   sandbox create|list|get|connect|exec|start|stop|delete
+  secret put|list|get|delete
+  profile import|list|get|delete|set-default
   logs
   completions bash|zsh
   version
@@ -55,7 +84,11 @@ const parseGlobals = (argv: string[]) => {
   const separator = argv.indexOf("--");
   const before = separator < 0 ? argv : argv.slice(0, separator);
   const trailing = separator < 0 ? [] : argv.slice(separator + 1);
-  const options: GlobalOptions = { output: "table", quiet: false };
+  const options: GlobalOptions = {
+    output: "table",
+    quiet: false,
+    noColor: false,
+  };
   const args: string[] = [];
   for (let index = 0; index < before.length; index += 1) {
     const value = before[index]!;
@@ -69,7 +102,7 @@ const parseGlobals = (argv: string[]) => {
         throw new Error("Output must be table or json");
       options.output = output;
     } else if (value === "--quiet") options.quiet = true;
-    else if (value === "--no-color") continue;
+    else if (value === "--no-color") options.noColor = true;
     else args.push(value);
   }
   return { options, args, trailing };
@@ -123,8 +156,15 @@ const tokenFromInput = async (requested: boolean) => {
   return token;
 };
 
+let outputContext: OutputContext = createOutputContext();
+
 const main = async () => {
   const parsed = parseGlobals(process.argv.slice(2));
+  outputContext = createOutputContext({
+    format: parsed.options.output,
+    noColor: parsed.options.noColor,
+    quiet: parsed.options.quiet,
+  });
   const [group, action, ...rest] = parsed.args;
   if (!group || group === "help" || group === "--help" || group === "-h") {
     console.log(usage);
@@ -134,6 +174,22 @@ const main = async () => {
   const selectedHost = () => {
     const config = loadConfig();
     return resolveHost(config, parsed.options.host);
+  };
+
+  const selectedSecretHost = () => {
+    const selected = selectedHost();
+    if (selected.config.transport === "direct") {
+      const endpoint = new URL(selected.config.apiEndpoint);
+      const local = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(
+        endpoint.hostname,
+      );
+      if (endpoint.protocol !== "https:" && !local) {
+        throw new Error(
+          "Secret and profile uploads require HTTPS, SSH transport, or a loopback endpoint",
+        );
+      }
+    }
+    return selected;
   };
 
   if (group === "version" || group === "--version" || group === "-V") {
@@ -167,7 +223,10 @@ const main = async () => {
             token,
           });
       saveConfig(putHost(loadConfig(), name, host));
-      console.log(`Host '${name}' added and selected`);
+      printSuccess(outputContext, `Host '${name}' added and selected`, {
+        name,
+        selected: true,
+      });
       return;
     }
     if (action === "list") {
@@ -178,37 +237,31 @@ const main = async () => {
         transport: value.transport,
         target: value.transport === "ssh" ? value.sshTarget : value.apiEndpoint,
       }));
-      if (parsed.options.output === "json")
-        console.log(JSON.stringify(rows, null, 2));
-      else
-        for (const row of rows)
-          console.log(
-            `${row.active ? "*" : " "} ${row.name}\t${row.transport}\t${row.target}`,
-          );
+      printHosts(rows, outputContext);
       return;
     }
     if (action === "select") {
       const name = requirePosition(rest, 0, "host name");
       saveConfig(selectHost(loadConfig(), name));
-      console.log(`Host '${name}' selected`);
+      printSuccess(outputContext, `Host '${name}' selected`, {
+        name,
+        selected: true,
+      });
       return;
     }
     if (action === "info") {
       const config = loadConfig();
       const selected = resolveHost(config, rest[0]);
-      console.log(
-        JSON.stringify(
-          { name: selected.name, ...selected.config, token: "<redacted>" },
-          null,
-          2,
-        ),
+      printProperties(
+        { name: selected.name, ...selected.config, token: "<redacted>" },
+        outputContext,
       );
       return;
     }
     if (action === "remove") {
       const name = requirePosition(rest, 0, "host name");
       saveConfig(removeHost(loadConfig(), name));
-      console.log(`Host '${name}' removed`);
+      printSuccess(outputContext, `Host '${name}' removed`, { name });
       return;
     }
     throw new Error("Usage: agentctl host add|list|select|info|remove");
@@ -219,13 +272,163 @@ const main = async () => {
     const status = await withGatewayClient(selected.config, (client) =>
       client.status(),
     );
-    if (parsed.options.output === "json")
-      console.log(JSON.stringify({ host: selected.name, ...status }, null, 2));
-    else
-      console.log(
-        `${selected.name}: gateway ${status.status}, docker ${status.docker}, database ${status.database}`,
-      );
+    printStatus(selected.name, status, outputContext);
     return;
+  }
+
+  if (group === "secret") {
+    const selected = selectedSecretHost();
+    if (action === "list") {
+      printSecrets(
+        await withGatewayClient(selected.config, (client) =>
+          client.listSecrets(),
+        ),
+        outputContext,
+      );
+      return;
+    }
+    if (action === "get") {
+      const name = requirePosition(rest, 0, "secret name");
+      printSecret(
+        await withGatewayClient(selected.config, (client) =>
+          client.getSecret(name),
+        ),
+        outputContext,
+      );
+      return;
+    }
+    if (action === "put") {
+      const options = parseOptions(rest, parsed.trailing, {
+        "--type": { key: "type" },
+        "--from-file": { key: "fromFile" },
+        "--expected-version": { key: "expectedVersion" },
+      });
+      const name = requirePosition(options.positionals, 0, "secret name");
+      const filename = options.values.fromFile;
+      if (!filename) throw new Error("Missing --from-file");
+      const input = putSecretRequestSchema.parse({
+        type: secretTypeSchema.parse(options.values.type ?? "opaque"),
+        valueBase64: readFileSync(filename).toString("base64"),
+        ...(options.values.expectedVersion
+          ? { expectedVersion: Number(options.values.expectedVersion) }
+          : {}),
+      });
+      printSecret(
+        await withGatewayClient(selected.config, (client) =>
+          client.putSecret(name, input),
+        ),
+        outputContext,
+      );
+      return;
+    }
+    if (action === "delete") {
+      const name = requirePosition(rest, 0, "secret name");
+      const deleted = await withGatewayClient(selected.config, (client) =>
+        client.deleteSecret(name),
+      );
+      printSuccess(outputContext, `Secret '${name}' deleted`, deleted);
+      return;
+    }
+    throw new Error("Usage: agentctl secret put|list|get|delete");
+  }
+
+  if (group === "profile") {
+    const selected = selectedSecretHost();
+    if (action === "list") {
+      printProfiles(
+        await withGatewayClient(selected.config, (client) =>
+          client.listProfiles(),
+        ),
+        outputContext,
+      );
+      return;
+    }
+    if (action === "get") {
+      const name = requirePosition(rest, 0, "profile name");
+      printProfile(
+        await withGatewayClient(selected.config, (client) =>
+          client.getProfile(name),
+        ),
+        outputContext,
+      );
+      return;
+    }
+    if (action === "import") {
+      const options = parseOptions(rest, parsed.trailing, {
+        "--agent": { key: "agent" },
+        "--include-auth": { key: "includeAuth", boolean: true },
+        "--set-default": { key: "setDefault", boolean: true },
+      });
+      const name = requirePosition(options.positionals, 0, "profile name");
+      const agent = agentTypeSchema.parse(options.values.agent);
+      const imported = importLocalProfile(
+        agent,
+        options.flags.has("includeAuth"),
+      );
+      const secretNames: string[] = [];
+      for (const credential of imported.credentials) {
+        const secretName = credentialName(name, credential.nameSuffix);
+        await withGatewayClient(selected.config, (client) =>
+          client.putSecret(
+            secretName,
+            putSecretRequestSchema.parse({
+              type: credential.type,
+              valueBase64: credential.value.toString("base64"),
+            }),
+          ),
+        );
+        secretNames.push(secretName);
+      }
+      const profile = await withGatewayClient(selected.config, (client) =>
+        client.putProfile(
+          name,
+          putAgentProfileRequestSchema.parse({
+            agent,
+            bundleBase64: imported.bundleBase64,
+            secretNames,
+          }),
+        ),
+      );
+      if (options.flags.has("setDefault")) {
+        await withGatewayClient(selected.config, (client) =>
+          client.setDefaultProfile(agent, name),
+        );
+      }
+      printProfile(
+        {
+          ...profile,
+          isDefault: options.flags.has("setDefault") || profile.isDefault,
+        },
+        outputContext,
+      );
+      return;
+    }
+    if (action === "delete") {
+      const name = requirePosition(rest, 0, "profile name");
+      const deleted = await withGatewayClient(selected.config, (client) =>
+        client.deleteProfile(name),
+      );
+      printSuccess(outputContext, `Profile '${name}' deleted`, deleted);
+      return;
+    }
+    if (action === "set-default") {
+      const agent = agentTypeSchema.parse(
+        requirePosition(rest, 0, "agent (codex or opencode)"),
+      );
+      const name = requirePosition(rest, 1, "profile name");
+      const profile = await withGatewayClient(selected.config, (client) =>
+        client.setDefaultProfile(agent, name),
+      );
+      printSuccess(
+        outputContext,
+        `Default ${agent} profile set to '${name}'`,
+        profile,
+      );
+      return;
+    }
+    throw new Error(
+      "Usage: agentctl profile import|list|get|delete|set-default",
+    );
   }
 
   const sandboxGroup = group === "sandbox" || group === "sb";
@@ -236,6 +439,7 @@ const main = async () => {
       "--repo": { key: "repo" },
       "--cpu": { key: "cpu" },
       "--memory": { key: "memory" },
+      "--profile": { key: "profile" },
     });
     if (options.positionals.length)
       throw new Error("Put the sandbox command after --");
@@ -247,6 +451,9 @@ const main = async () => {
       ...(options.values.repo ? { repositoryUrl: options.values.repo } : {}),
       ...(options.values.cpu ? { cpu: options.values.cpu } : {}),
       ...(options.values.memory ? { memory: options.values.memory } : {}),
+      ...(options.values.profile
+        ? { profileName: options.values.profile }
+        : {}),
       publicKey: key.publicKey,
       command: options.trailing,
     });
@@ -254,7 +461,8 @@ const main = async () => {
       await withGatewayClient(selected.config, (client) =>
         client.create(request),
       ),
-      parsed.options.output,
+      outputContext,
+      { operation: "create" },
     );
     return;
   }
@@ -263,7 +471,7 @@ const main = async () => {
     const selected = selectedHost();
     printSandboxes(
       await withGatewayClient(selected.config, (client) => client.list()),
-      parsed.options.output,
+      outputContext,
     );
     return;
   }
@@ -273,7 +481,8 @@ const main = async () => {
     const selected = selectedHost();
     printSandbox(
       await withGatewayClient(selected.config, (client) => client.get(id)),
-      parsed.options.output,
+      outputContext,
+      { operation: "get" },
     );
     return;
   }
@@ -285,7 +494,8 @@ const main = async () => {
       await withGatewayClient(selected.config, (client) =>
         client.action(id, action),
       ),
-      parsed.options.output,
+      outputContext,
+      { operation: action },
     );
     return;
   }
@@ -310,11 +520,13 @@ const main = async () => {
       if (answer !== "delete") throw new Error("Deletion cancelled");
     }
     const selected = selectedHost();
+    const deleteVolume = options.flags.has("deleteVolume");
     printSandbox(
       await withGatewayClient(selected.config, (client) =>
-        client.delete(id, options.flags.has("deleteVolume")),
+        client.delete(id, deleteVolume),
       ),
-      parsed.options.output,
+      outputContext,
+      { operation: "delete", deleteVolume },
     );
     return;
   }
@@ -384,7 +596,10 @@ const main = async () => {
     if (ssh.status !== 0) throw new Error("OpenSSH client is unavailable");
     const selected = selectedHost();
     await withGatewayClient(selected.config, (client) => client.status());
-    console.log(`ok: OpenSSH and gateway '${selected.name}' are ready`);
+    printSuccess(
+      outputContext,
+      `OpenSSH and gateway '${selected.name}' are ready`,
+    );
     return;
   }
 
@@ -401,6 +616,10 @@ const main = async () => {
 };
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  printError(
+    error,
+    outputContext,
+    error instanceof GatewayError ? error.code : undefined,
+  );
   process.exitCode = 1;
 });

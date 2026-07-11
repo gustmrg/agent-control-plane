@@ -58,6 +58,9 @@ class FakeRuntime implements ContainerRuntime {
   async removeVolume(name: string) {
     this.removedVolumes.push(name);
   }
+  async readStateFile() {
+    return null;
+  }
 
   async logs() {
     return Readable.from(["sandbox ready\n"]);
